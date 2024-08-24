@@ -17,619 +17,29 @@
 
 #![cfg(test)]
 
-use super::*;
-use crate::mock::*;
-
+use std::{collections::BTreeMap, str::FromStr};
+// Frontier
+use fp_evm::TransactionPov;
+// Substrate
 use frame_support::{
 	assert_ok,
 	traits::{LockIdentifier, LockableCurrency, WithdrawReasons},
 };
+use sp_core::Blake2Hasher;
+use sp_io::TestExternalities;
 use sp_runtime::BuildStorage;
-use std::{collections::BTreeMap, str::FromStr};
-
-mod proof_size_test {
-	use super::*;
-	use fp_evm::{
-		CreateInfo, ACCOUNT_BASIC_PROOF_SIZE, ACCOUNT_CODES_METADATA_PROOF_SIZE,
-		ACCOUNT_STORAGE_PROOF_SIZE, IS_EMPTY_CHECK_PROOF_SIZE, WRITE_PROOF_SIZE,
-	};
-	use frame_support::traits::StorageInfoTrait;
-	// pragma solidity ^0.8.2;
-	// contract Callee {
-	//     // ac4c25b2
-	//     function void() public {
-	//         uint256 foo = 1;
-	//     }
-	// }
-	pub const PROOF_SIZE_TEST_CALLEE_CONTRACT_BYTECODE: &str =
-		include_str!("./res/proof_size_test_callee_contract_bytecode.txt");
-	// pragma solidity ^0.8.2;
-	// contract ProofSizeTest {
-	//     uint256 foo;
-	//     constructor() {
-	//         foo = 6;
-	//     }
-	//     // 35f56c3b
-	//     function test_balance(address who) public {
-	//         // cold
-	//         uint256 a = address(who).balance;
-	//         // warm
-	//         uint256 b = address(who).balance;
-	//     }
-	//     // e27a0ecd
-	//     function test_sload() public returns (uint256) {
-	//         // cold
-	//         uint256 a = foo;
-	//         // warm
-	//         uint256 b = foo;
-	//         return b;
-	//     }
-	//     // 4f3080a9
-	//     function test_sstore() public {
-	//         // cold
-	//         foo = 4;
-	//         // warm
-	//         foo = 5;
-	//     }
-	//     // c6d6f606
-	//     function test_call(Callee _callee) public {
-	//         _callee.void();
-	//     }
-	//     // 944ddc62
-	//     function test_oog() public {
-	//         uint256 i = 1;
-	//         while(true) {
-	//             address who = address(uint160(uint256(keccak256(abi.encodePacked(bytes32(i))))));
-	//             uint256 a = address(who).balance;
-	//             i = i + 1;
-	//         }
-	//     }
-	// }
-	pub const PROOF_SIZE_TEST_CONTRACT_BYTECODE: &str =
-		include_str!("./res/proof_size_test_contract_bytecode.txt");
-
-	fn create_proof_size_test_callee_contract(
-		gas_limit: u64,
-		weight_limit: Option<Weight>,
-	) -> Result<CreateInfo, crate::RunnerError<crate::Error<Test>>> {
-		<Test as Config>::Runner::create(
-			H160::default(),
-			hex::decode(PROOF_SIZE_TEST_CALLEE_CONTRACT_BYTECODE.trim_end()).unwrap(),
-			U256::zero(),
-			gas_limit,
-			Some(FixedGasPrice::min_gas_price().0),
-			None,
-			None,
-			Vec::new(),
-			true, // transactional
-			true, // must be validated
-			weight_limit,
-			Some(0),
-			&<Test as Config>::config().clone(),
-		)
-	}
-
-	fn create_proof_size_test_contract(
-		gas_limit: u64,
-		weight_limit: Option<Weight>,
-	) -> Result<CreateInfo, crate::RunnerError<crate::Error<Test>>> {
-		<Test as Config>::Runner::create(
-			H160::default(),
-			hex::decode(PROOF_SIZE_TEST_CONTRACT_BYTECODE.trim_end()).unwrap(),
-			U256::zero(),
-			gas_limit,
-			Some(FixedGasPrice::min_gas_price().0),
-			None,
-			None,
-			Vec::new(),
-			true, // non-transactional
-			true, // must be validated
-			weight_limit,
-			Some(0),
-			&<Test as Config>::config().clone(),
-		)
-	}
-
-	#[test]
-	fn account_basic_proof_size_constant_matches() {
-		assert_eq!(
-			ACCOUNT_BASIC_PROOF_SIZE,
-			frame_system::Account::<Test>::storage_info()
-				.first()
-				.expect("item")
-				.max_size
-				.expect("size") as u64
-		);
-	}
-
-	#[test]
-	fn account_storage_proof_size_constant_matches() {
-		assert_eq!(
-			ACCOUNT_STORAGE_PROOF_SIZE,
-			AccountStorages::<Test>::storage_info()
-				.first()
-				.expect("item")
-				.max_size
-				.expect("size") as u64
-		);
-	}
-
-	#[test]
-	fn account_codes_metadata_proof_size_constant_matches() {
-		assert_eq!(
-			ACCOUNT_CODES_METADATA_PROOF_SIZE,
-			AccountCodesMetadata::<Test>::storage_info()
-				.first()
-				.expect("item")
-				.max_size
-				.expect("size") as u64
-		);
-	}
-
-	#[test]
-	fn proof_size_create_accounting_works() {
-		new_test_ext().execute_with(|| {
-			let gas_limit: u64 = 1_000_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			let result = create_proof_size_test_callee_contract(gas_limit, Some(weight_limit))
-				.expect("create succeeds");
-
-			// Creating a new contract does not involve reading the code from storage.
-			// We account for a fixed hash proof size write, an empty check and .
-			let write_cost = WRITE_PROOF_SIZE;
-			let is_empty_check = IS_EMPTY_CHECK_PROOF_SIZE;
-			let nonce_increases = ACCOUNT_BASIC_PROOF_SIZE * 2;
-			let expected_proof_size = write_cost + is_empty_check + nonce_increases;
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn proof_size_subcall_accounting_works() {
-		new_test_ext().execute_with(|| {
-			// Create callee contract A
-			let gas_limit: u64 = 1_000_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-			let result =
-				create_proof_size_test_callee_contract(gas_limit, None).expect("create succeeds");
-
-			let subcall_contract_address = result.value;
-
-			// Create proof size test contract B
-			let result = create_proof_size_test_contract(gas_limit, None).expect("create succeeds");
-
-			let call_contract_address = result.value;
-
-			// Call B, that calls A, with weight limit
-			// selector for ProofSizeTest::test_call function..
-			let mut call_data: String = "c6d6f606000000000000000000000000".to_owned();
-			// ..encode the callee address argument
-			call_data.push_str(&format!("{:x}", subcall_contract_address));
-
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				call_contract_address,
-				hex::decode(&call_data).unwrap(),
-				U256::zero(),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&<Test as Config>::config().clone(),
-			)
-			.expect("call succeeds");
-
-			// Expected proof size
-			let reading_main_contract_len = AccountCodes::<Test>::get(call_contract_address).len();
-			let reading_contract_len = AccountCodes::<Test>::get(subcall_contract_address).len();
-			let read_account_metadata = ACCOUNT_CODES_METADATA_PROOF_SIZE as usize;
-			let is_empty_check = (IS_EMPTY_CHECK_PROOF_SIZE * 2) as usize;
-			let increase_nonce = (ACCOUNT_BASIC_PROOF_SIZE * 3) as usize;
-			let expected_proof_size = ((read_account_metadata * 2)
-				+ reading_contract_len
-				+ reading_main_contract_len
-				+ is_empty_check + increase_nonce) as u64;
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn proof_size_balance_accounting_works() {
-		new_test_ext().execute_with(|| {
-			let gas_limit: u64 = 1_000_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			// Create proof size test contract
-			let result = create_proof_size_test_contract(gas_limit, None).expect("create succeeds");
-
-			let call_contract_address = result.value;
-
-			// selector for ProofSizeTest::balance function..
-			let mut call_data: String = "35f56c3b000000000000000000000000".to_owned();
-			// ..encode bobs address
-			call_data.push_str(&format!("{:x}", H160::random()));
-
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				call_contract_address,
-				hex::decode(&call_data).unwrap(),
-				U256::zero(),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&<Test as Config>::config().clone(),
-			)
-			.expect("call succeeds");
-
-			// - Three account reads.
-			// - Main contract code read.
-			// - One metadata read.
-			let basic_account_size = (ACCOUNT_BASIC_PROOF_SIZE * 3) as usize;
-			let read_account_metadata = ACCOUNT_CODES_METADATA_PROOF_SIZE as usize;
-			let is_empty_check = IS_EMPTY_CHECK_PROOF_SIZE as usize;
-			let increase_nonce = ACCOUNT_BASIC_PROOF_SIZE as usize;
-			let reading_main_contract_len = AccountCodes::<Test>::get(call_contract_address).len();
-			let expected_proof_size = (basic_account_size
-				+ read_account_metadata
-				+ reading_main_contract_len
-				+ is_empty_check + increase_nonce) as u64;
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn proof_size_sload_accounting_works() {
-		new_test_ext().execute_with(|| {
-			let gas_limit: u64 = 1_000_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			// Create proof size test contract
-			let result = create_proof_size_test_contract(gas_limit, None).expect("create succeeds");
-
-			let call_contract_address = result.value;
-
-			// selector for ProofSizeTest::test_sload function..
-			let call_data: String = "e27a0ecd".to_owned();
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				call_contract_address,
-				hex::decode(call_data).unwrap(),
-				U256::zero(),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&<Test as Config>::config().clone(),
-			)
-			.expect("call succeeds");
-
-			let reading_main_contract_len =
-				AccountCodes::<Test>::get(call_contract_address).len() as u64;
-			let expected_proof_size = reading_main_contract_len
-				+ ACCOUNT_STORAGE_PROOF_SIZE
-				+ ACCOUNT_CODES_METADATA_PROOF_SIZE
-				+ IS_EMPTY_CHECK_PROOF_SIZE
-				+ (ACCOUNT_BASIC_PROOF_SIZE * 2);
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn proof_size_sstore_accounting_works() {
-		new_test_ext().execute_with(|| {
-			let gas_limit: u64 = 1_000_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			// Create proof size test contract
-			let result = create_proof_size_test_contract(gas_limit, None).expect("create succeeds");
-
-			let call_contract_address = result.value;
-
-			// selector for ProofSizeTest::test_sstore function..
-			let call_data: String = "4f3080a9".to_owned();
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				call_contract_address,
-				hex::decode(call_data).unwrap(),
-				U256::zero(),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&<Test as Config>::config().clone(),
-			)
-			.expect("call succeeds");
-
-			let reading_main_contract_len =
-				AccountCodes::<Test>::get(call_contract_address).len() as u64;
-			let expected_proof_size = reading_main_contract_len
-				+ WRITE_PROOF_SIZE
-				+ ACCOUNT_CODES_METADATA_PROOF_SIZE
-				+ ACCOUNT_STORAGE_PROOF_SIZE
-				+ IS_EMPTY_CHECK_PROOF_SIZE
-				+ (ACCOUNT_BASIC_PROOF_SIZE * 2);
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn proof_size_oog_works() {
-		new_test_ext().execute_with(|| {
-			let gas_limit: u64 = 1_000_000;
-			let mut weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			// Artifically set a lower proof size limit so we OOG this instead gas.
-			*weight_limit.proof_size_mut() = weight_limit.proof_size() / 2;
-
-			// Create proof size test contract
-			let result = create_proof_size_test_contract(gas_limit, None).expect("create succeeds");
-
-			let call_contract_address = result.value;
-
-			// selector for ProofSizeTest::test_oog function..
-			let call_data: String = "944ddc62".to_owned();
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				call_contract_address,
-				hex::decode(call_data).unwrap(),
-				U256::zero(),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&<Test as Config>::config().clone(),
-			)
-			.expect("call succeeds");
-
-			// Find how many random balance reads can we do with the available proof size.
-			let reading_main_contract_len =
-				AccountCodes::<Test>::get(call_contract_address).len() as u64;
-			let overhead = reading_main_contract_len
-				+ ACCOUNT_CODES_METADATA_PROOF_SIZE
-				+ IS_EMPTY_CHECK_PROOF_SIZE;
-			let available_proof_size = weight_limit.proof_size() - overhead;
-			let number_balance_reads =
-				available_proof_size.saturating_div(ACCOUNT_BASIC_PROOF_SIZE);
-			// The actual proof size consumed by those balance reads.
-			let expected_proof_size = overhead + (number_balance_reads * ACCOUNT_BASIC_PROOF_SIZE);
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn uncached_account_code_proof_size_accounting_works() {
-		new_test_ext().execute_with(|| {
-			// Create callee contract A
-			let gas_limit: u64 = 1_000_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-			let result =
-				create_proof_size_test_callee_contract(gas_limit, None).expect("create succeeds");
-
-			let subcall_contract_address = result.value;
-
-			// Expect callee contract code hash and size to be cached
-			let _ = <AccountCodesMetadata<Test>>::get(subcall_contract_address)
-				.expect("contract code hash and size are cached");
-
-			// Remove callee cache
-			<AccountCodesMetadata<Test>>::remove(subcall_contract_address);
-
-			// Create proof size test contract B
-			let result = create_proof_size_test_contract(gas_limit, None).expect("create succeeds");
-
-			let call_contract_address = result.value;
-
-			// Call B, that calls A, with weight limit
-			// selector for ProofSizeTest::test_call function..
-			let mut call_data: String = "c6d6f606000000000000000000000000".to_owned();
-			// ..encode the callee address argument
-			call_data.push_str(&format!("{:x}", subcall_contract_address));
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				call_contract_address,
-				hex::decode(&call_data).unwrap(),
-				U256::zero(),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&<Test as Config>::config().clone(),
-			)
-			.expect("call succeeds");
-
-			// Expected proof size
-			let read_account_metadata = ACCOUNT_CODES_METADATA_PROOF_SIZE as usize;
-			let is_empty_check = (IS_EMPTY_CHECK_PROOF_SIZE * 2) as usize;
-			let increase_nonce = (ACCOUNT_BASIC_PROOF_SIZE * 3) as usize;
-			let reading_main_contract_len = AccountCodes::<Test>::get(call_contract_address).len();
-			let reading_callee_contract_len =
-				AccountCodes::<Test>::get(subcall_contract_address).len();
-			// In order to do the subcall, we need to check metadata 3 times -
-			// one for each contract + one for the call opcode -, load two bytecodes - caller and callee.
-			let expected_proof_size = ((read_account_metadata * 2)
-				+ reading_callee_contract_len
-				+ reading_main_contract_len
-				+ is_empty_check + increase_nonce) as u64;
-
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(expected_proof_size, actual_proof_size);
-		});
-	}
-
-	#[test]
-	fn proof_size_breaks_standard_transfer() {
-		new_test_ext().execute_with(|| {
-			// In this test we do a simple transfer to an address with an stored code which is
-			// greater in size (and thus load cost) than the transfer flat fee of 21_000.
-
-			// We assert that providing 21_000 gas limit will not work, because the pov size limit
-			// will OOG.
-			let fake_contract_address = H160::random();
-			let config = <Test as Config>::config().clone();
-			let fake_contract_code = vec![0; config.create_contract_limit.expect("a value")];
-			AccountCodes::<Test>::insert(fake_contract_address, fake_contract_code);
-
-			let gas_limit: u64 = 21_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				fake_contract_address,
-				Vec::new(),
-				U256::from(777),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&config,
-			)
-			.expect("call succeeds");
-
-			assert_eq!(
-				result.exit_reason,
-				crate::ExitReason::Error(crate::ExitError::OutOfGas)
-			);
-		});
-	}
-
-	#[test]
-	fn proof_size_based_refunding_works() {
-		new_test_ext().execute_with(|| {
-			// In this test we do a simple transfer to an address with an stored code which is
-			// greater in size (and thus load cost) than the transfer flat fee of 21_000.
-
-			// Assert that if we provide enough gas limit, the refund will be based on the pov
-			// size consumption, not the 21_000 gas.
-			let fake_contract_address = H160::random();
-			let config = <Test as Config>::config().clone();
-			let fake_contract_code = vec![0; config.create_contract_limit.expect("a value")];
-			AccountCodes::<Test>::insert(fake_contract_address, fake_contract_code);
-
-			let gas_limit: u64 = 700_000;
-			let weight_limit = FixedGasWeightMapping::<Test>::gas_to_weight(gas_limit, true);
-
-			let result = <Test as Config>::Runner::call(
-				H160::default(),
-				fake_contract_address,
-				Vec::new(),
-				U256::from(777),
-				gas_limit,
-				Some(FixedGasPrice::min_gas_price().0),
-				None,
-				None,
-				Vec::new(),
-				true, // transactional
-				true, // must be validated
-				Some(weight_limit),
-				Some(0),
-				&config,
-			)
-			.expect("call succeeds");
-
-			let ratio = <<Test as Config>::GasLimitPovSizeRatio as Get<u64>>::get();
-			let used_gas = result.used_gas;
-			let actual_proof_size = result
-				.weight_info
-				.expect("weight info")
-				.proof_size_usage
-				.expect("proof size usage");
-
-			assert_eq!(used_gas.standard, U256::from(21_000));
-			assert_eq!(used_gas.effective, U256::from(actual_proof_size * ratio));
-		});
-	}
-}
+use sp_state_machine::TrieBackendBuilder;
+use sp_trie::{proof_size_extension::ProofSizeExt, recorder::Recorder};
+
+use super::*;
+use crate::mock::*;
 
 type Balances = pallet_balances::Pallet<Test>;
 #[allow(clippy::upper_case_acronyms)]
 type EVM = Pallet<Test>;
 
-pub fn new_test_ext() -> sp_io::TestExternalities {
-	let mut t = frame_system::GenesisConfig::<Test>::default()
+pub fn new_test_ext() -> TestExternalities {
+	let mut storage = frame_system::GenesisConfig::<Test>::default()
 		.build_storage()
 		.unwrap();
 
@@ -673,17 +83,34 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 			12345,
 		)],
 	}
-	.assimilate_storage(&mut t)
+	.assimilate_storage(&mut storage)
 	.expect("Pallet balances storage can be assimilated");
 
 	crate::GenesisConfig::<Test> {
 		accounts,
 		..Default::default()
 	}
-	.assimilate_storage(&mut t)
+	.assimilate_storage(&mut storage)
 	.unwrap();
 
-	t.into()
+	storage.into()
+}
+
+pub fn new_text_ext_with_recorder() -> TestExternalities {
+	let text_ext = new_test_ext();
+
+	let root = *text_ext.backend.root();
+	let db = text_ext.backend.into_storage();
+	let recorder: Recorder<Blake2Hasher> = Default::default();
+	let backend_with_reorder = TrieBackendBuilder::new(db, root)
+		.with_recorder(recorder.clone())
+		.build();
+
+	let mut test_ext_with_recorder: TestExternalities = TestExternalities::default();
+	test_ext_with_recorder.backend = backend_with_reorder;
+	test_ext_with_recorder.register_extension(ProofSizeExt::new(recorder));
+
+	test_ext_with_recorder
 }
 
 #[test]
@@ -1066,7 +493,6 @@ fn runner_non_transactional_calls_with_non_balance_accounts_is_ok_without_gas_pr
 			false, // non-transactional
 			true,  // must be validated
 			None,
-			None,
 			&<Test as Config>::config().clone(),
 		)
 		.expect("Non transactional call succeeds");
@@ -1102,7 +528,6 @@ fn runner_non_transactional_calls_with_non_balance_accounts_is_err_with_gas_pric
 			false, // non-transactional
 			true,  // must be validated
 			None,
-			None,
 			&<Test as Config>::config().clone(),
 		);
 		assert!(res.is_err());
@@ -1125,7 +550,6 @@ fn runner_transactional_call_with_zero_gas_price_fails() {
 			Vec::new(),
 			true, // transactional
 			true, // must be validated
-			None,
 			None,
 			&<Test as Config>::config().clone(),
 		);
@@ -1150,7 +574,6 @@ fn runner_max_fee_per_gas_gte_max_priority_fee_per_gas() {
 			true, // transactional
 			true, // must be validated
 			None,
-			None,
 			&<Test as Config>::config().clone(),
 		);
 		assert!(res.is_err());
@@ -1166,7 +589,6 @@ fn runner_max_fee_per_gas_gte_max_priority_fee_per_gas() {
 			Vec::new(),
 			false, // non-transactional
 			true,  // must be validated
-			None,
 			None,
 			&<Test as Config>::config().clone(),
 		);
@@ -1192,7 +614,6 @@ fn eip3607_transaction_from_contract() {
 			true,  // transactional
 			false, // not sure be validated
 			None,
-			None,
 			&<Test as Config>::config().clone(),
 		) {
 			Err(RunnerError {
@@ -1216,7 +637,6 @@ fn eip3607_transaction_from_contract() {
 			Vec::new(),
 			false, // non-transactional
 			true,  // must be validated
-			None,
 			None,
 			&<Test as Config>::config().clone(),
 		)
@@ -1258,5 +678,199 @@ fn metadata_empty_dont_code_gets_cached() {
 		);
 
 		assert!(<AccountCodesMetadata<Test>>::get(address).is_none());
+	});
+}
+
+// SPDX-License-Identifier: GPL-3.0
+// pragma solidity >=0.8.2 <0.9.0;
+// contract ProofTest {
+//     uint256 number;
+//
+//     function set_number(uint num) public {
+//         number = num;
+//     }
+//
+//     function get_number() public view returns (uint256) {
+//         return number;
+//     }
+// }
+
+const PROOF_TEST_BYTECODE: &str = "6080604052348015600e575f80fd5b506101438061001c5f395ff3fe608060405234801561000f575f80fd5b5060043610610034575f3560e01c8063d6d1ee1414610038578063eeb4e36714610054575b5f80fd5b610052600480360381019061004d91906100ba565b610072565b005b61005c61007b565b60405161006991906100f4565b60405180910390f35b805f8190555050565b5f8054905090565b5f80fd5b5f819050919050565b61009981610087565b81146100a3575f80fd5b50565b5f813590506100b481610090565b92915050565b5f602082840312156100cf576100ce610083565b5b5f6100dc848285016100a6565b91505092915050565b6100ee81610087565b82525050565b5f6020820190506101075f8301846100e5565b9291505056fea26469706673582212201114104d5a56d94d03255e0f9fa699d53db26e355fb37f735caa200d7ce5158e64736f6c634300081a0033";
+
+#[test]
+fn proof_size_create_contract() {
+	let proof_size = || -> u64 {
+		cumulus_primitives_storage_weight_reclaim::get_proof_size()
+			.expect("ensure the proof size host function is enabled.")
+	};
+
+	let mut test_ext_with_recorder = new_text_ext_with_recorder();
+	test_ext_with_recorder.execute_with(|| {
+		// The initial proof size should be 0
+		assert_eq!(proof_size(), 0);
+		// Read the storage increases the proof size
+		EVM::account_basic(&H160::from_str("1000000000000000000000000000000000000002").unwrap());
+		assert_eq!(proof_size(), 583);
+		AccountCodes::<Test>::get(
+			H160::from_str("1000000000000000000000000000000000000001").unwrap(),
+		);
+		assert_eq!(proof_size(), 799);
+	});
+
+	test_ext_with_recorder.execute_with(|| {
+		let transaction_pov =
+			TransactionPov::new(Weight::from_parts(10000000000000, 5000), proof_size());
+		let res = <Test as Config>::Runner::create(
+			H160::default(),
+			hex::decode(PROOF_TEST_BYTECODE).unwrap(),
+			U256::zero(),
+			10000000,
+			Some(FixedGasPrice::min_gas_price().0),
+			None,
+			None,
+			Vec::new(),
+			true, // transactional|
+			true, // must be validated
+			Some(transaction_pov),
+			&<Test as Config>::config().clone(),
+		)
+		.expect("create contract failed");
+		let contract_addr = res.value;
+		assert!(!AccountCodes::<Test>::get(contract_addr).is_empty());
+		assert_eq!(proof_size(), 1196);
+	});
+}
+
+#[test]
+fn proof_size_reach_limit() {
+	let proof_size = || -> u64 {
+		cumulus_primitives_storage_weight_reclaim::get_proof_size()
+			.expect("ensure the proof size host function is enabled.")
+	};
+
+	let mut test_ext_with_recorder = new_text_ext_with_recorder();
+	// create contract run out of proof size
+	test_ext_with_recorder.execute_with(|| {
+		let transaction_pov =
+			TransactionPov::new(Weight::from_parts(10000000000000, 101), proof_size());
+		let res = <Test as Config>::Runner::create(
+			H160::default(),
+			hex::decode(PROOF_TEST_BYTECODE).unwrap(),
+			U256::zero(),
+			10000000,
+			Some(FixedGasPrice::min_gas_price().0),
+			None,
+			None,
+			Vec::new(),
+			true, // transactional
+			true, // must be validated
+			Some(transaction_pov),
+			&<Test as Config>::config().clone(),
+		)
+		.expect("create contract failed");
+		assert_eq!(res.exit_reason, ExitReason::Error(ExitError::OutOfGas));
+		let contract_addr = res.value;
+		assert!(AccountCodes::<Test>::get(contract_addr).is_empty());
+	});
+
+	// call contract run out of proof size
+	test_ext_with_recorder.execute_with(|| {
+		let mut transaction_pov =
+			TransactionPov::new(Weight::from_parts(10000000000000, 5000), proof_size());
+		let res = <Test as Config>::Runner::create(
+			H160::default(),
+			hex::decode(PROOF_TEST_BYTECODE).unwrap(),
+			U256::zero(),
+			10000000,
+			Some(FixedGasPrice::min_gas_price().0),
+			None,
+			None,
+			Vec::new(),
+			true, // transactional
+			true, // must be validated
+			Some(transaction_pov),
+			&<Test as Config>::config().clone(),
+		)
+		.expect("create contract failed");
+		let contract_addr = res.value;
+		assert!(!AccountCodes::<Test>::get(contract_addr).is_empty());
+
+		// set_number(6)
+		let calldata = "d6d1ee140000000000000000000000000000000000000000000000000000000000000006";
+		transaction_pov.proof_size_pre_execution = 100;
+		transaction_pov.weight_limit = Weight::from_parts(10000000000000, 1);
+		let res = <Test as Config>::Runner::call(
+			H160::default(),
+			contract_addr,
+			hex::decode(calldata).unwrap(),
+			U256::zero(),
+			10000000,
+			Some(FixedGasPrice::min_gas_price().0),
+			None,
+			None,
+			Vec::new(),
+			true,  // transactional
+			false, // must be validated
+			Some(transaction_pov),
+			&<Test as Config>::config().clone(),
+		)
+		.expect("call contract failed");
+		assert_eq!(res.exit_reason, ExitReason::Error(ExitError::OutOfGas));
+
+		// get_number()
+		let calldata = "eeb4e367";
+		transaction_pov.weight_limit = Weight::from_parts(10000000000000, 50000);
+		let res = <Test as Config>::Runner::call(
+			H160::default(),
+			contract_addr,
+			hex::decode(calldata).unwrap(),
+			U256::zero(),
+			10000000,
+			Some(FixedGasPrice::min_gas_price().0),
+			None,
+			None,
+			Vec::new(),
+			true,  // transactional
+			false, // must be validated
+			Some(transaction_pov),
+			&<Test as Config>::config().clone(),
+		)
+		.expect("call contract failed");
+		assert_eq!(U256::from_big_endian(&res.value), U256::from(0));
+	});
+}
+
+#[test]
+fn proof_size_reach_limit_nonce_increase() {
+	let proof_size = || -> u64 {
+		cumulus_primitives_storage_weight_reclaim::get_proof_size()
+			.expect("ensure the proof size host function is enabled.")
+	};
+
+	let mut test_ext_with_recorder = new_text_ext_with_recorder();
+	test_ext_with_recorder.execute_with(|| {
+		let original_nonce = EVM::account_basic(&H160::default()).0.nonce;
+		let transaction_pov =
+			TransactionPov::new(Weight::from_parts(10000000000000, 101), proof_size());
+		let res = <Test as Config>::Runner::create(
+			H160::default(),
+			hex::decode(PROOF_TEST_BYTECODE).unwrap(),
+			U256::zero(),
+			10000000,
+			Some(FixedGasPrice::min_gas_price().0),
+			None,
+			None,
+			Vec::new(),
+			true, // transactional
+			true, // must be validated
+			Some(transaction_pov),
+			&<Test as Config>::config().clone(),
+		)
+		.expect("create contract failed");
+		assert_eq!(res.exit_reason, ExitReason::Error(ExitError::OutOfGas));
+		assert_eq!(
+			EVM::account_basic(&H160::default()).0.nonce,
+			original_nonce + 1
+		);
 	});
 }

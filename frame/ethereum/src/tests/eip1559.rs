@@ -19,8 +19,9 @@
 
 use super::*;
 use evm::{ExitReason, ExitRevert, ExitSucceed};
-use fp_ethereum::{TransactionData, ValidatedTransaction};
+use fp_ethereum::ValidatedTransaction;
 use frame_support::{dispatch::DispatchClass, traits::Get, weights::Weight};
+use frame_system::limits::BlockWeights;
 use pallet_evm::{AddressMapping, GasWeightMapping};
 
 fn eip1559_erc20_creation_unsigned_transaction() -> EIP1559UnsignedTransaction {
@@ -45,8 +46,7 @@ fn transaction_with_max_extrinsic_gas_limit_should_success_pre_dispatch() {
 	let alice = &pairs[0];
 	let bob = &pairs[1];
 
-	let limits: frame_system::limits::BlockWeights =
-		<Test as frame_system::Config>::BlockWeights::get();
+	let limits: BlockWeights = <Test as frame_system::Config>::BlockWeights::get();
 	let max_extrinsic = limits.get(DispatchClass::Normal).max_extrinsic.unwrap();
 	let max_extrinsic_gas =
 		<Test as pallet_evm::Config>::GasWeightMapping::weight_to_gas(max_extrinsic);
@@ -82,8 +82,7 @@ fn transaction_with_gas_limit_greater_than_max_extrinsic_should_fail_pre_dispatc
 	let alice = &pairs[0];
 	let bob = &pairs[1];
 
-	let limits: frame_system::limits::BlockWeights =
-		<Test as frame_system::Config>::BlockWeights::get();
+	let limits: BlockWeights = <Test as frame_system::Config>::BlockWeights::get();
 	let max_extrinsic = limits.get(DispatchClass::Normal).max_extrinsic.unwrap();
 	let base_extrinsic = limits.get(DispatchClass::Normal).base_extrinsic;
 	let max_extrinsic_gas = <Test as pallet_evm::Config>::GasWeightMapping::weight_to_gas(
@@ -550,74 +549,5 @@ fn validated_transaction_apply_zero_gas_price_works() {
 		assert_eq!(Balances::free_balance(&substrate_alice), 900);
 		// Bob received 100 from Alice.
 		assert_eq!(Balances::free_balance(&substrate_bob), 1_100);
-	});
-}
-
-#[test]
-fn proof_size_weight_limit_validation_works() {
-	let (pairs, mut ext) = new_test_ext(1);
-	let alice = &pairs[0];
-
-	ext.execute_with(|| {
-		let mut tx = EIP1559UnsignedTransaction {
-			nonce: U256::from(2),
-			max_priority_fee_per_gas: U256::zero(),
-			max_fee_per_gas: U256::from(1),
-			gas_limit: U256::from(0x100000),
-			action: ethereum::TransactionAction::Call(alice.address),
-			value: U256::from(1),
-			input: Vec::new(),
-		};
-
-		let gas_limit: u64 = 1_000_000;
-		tx.gas_limit = U256::from(gas_limit);
-
-		let weight_limit =
-			<Test as pallet_evm::Config>::GasWeightMapping::gas_to_weight(gas_limit, true);
-
-		// Gas limit cannot afford the extra byte and thus is expected to exhaust.
-		tx.input = vec![0u8; (weight_limit.proof_size() + 1) as usize];
-		let tx = tx.sign(&alice.private_key, None);
-
-		// Execute
-		assert!(
-			Ethereum::transact(RawOrigin::EthereumTransaction(alice.address).into(), tx,).is_err()
-		);
-	});
-}
-
-#[test]
-fn proof_size_base_cost_should_keep_the_same_in_execution_and_estimate() {
-	let (pairs, mut ext) = new_test_ext(1);
-	let alice = &pairs[0];
-
-	ext.execute_with(|| {
-		let raw_tx = EIP1559UnsignedTransaction {
-			nonce: U256::zero(),
-			max_priority_fee_per_gas: U256::zero(),
-			max_fee_per_gas: U256::zero(),
-			gas_limit: U256::from(21_000),
-			action: ethereum::TransactionAction::Create,
-			value: U256::from(100),
-			input: vec![9; 100],
-		};
-
-		let tx_data: TransactionData = (&raw_tx.sign(&alice.private_key, Some(100))).into();
-		let estimate_tx_data = TransactionData::new(
-			raw_tx.action,
-			raw_tx.input,
-			raw_tx.nonce,
-			raw_tx.gas_limit,
-			None,
-			Some(raw_tx.max_fee_per_gas),
-			Some(raw_tx.max_priority_fee_per_gas),
-			raw_tx.value,
-			Some(100),
-			vec![],
-		);
-		assert_eq!(
-			estimate_tx_data.proof_size_base_cost(),
-			tx_data.proof_size_base_cost()
-		);
 	});
 }

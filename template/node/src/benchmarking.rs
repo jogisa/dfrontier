@@ -15,6 +15,7 @@ use fp_account::AccountId20;
 use frontier_template_runtime::{self as runtime, AccountId, Balance, BalancesCall, SystemCall};
 
 use crate::service::Client;
+use polkadot_service as _;
 
 /// Generates extrinsics for the `benchmark overhead` command.
 ///
@@ -133,6 +134,7 @@ pub fn create_benchmark_extrinsic(
 		frame_system::CheckNonce::<runtime::Runtime>::from(nonce),
 		frame_system::CheckWeight::<runtime::Runtime>::new(),
 		pallet_transaction_payment::ChargeTransactionPayment::<runtime::Runtime>::from(0),
+		cumulus_primitives_storage_weight_reclaim::StorageWeightReclaim::<runtime::Runtime>::new(),
 	);
 
 	let raw_payload = runtime::SignedPayload::from_raw(
@@ -144,6 +146,7 @@ pub fn create_benchmark_extrinsic(
 			runtime::VERSION.transaction_version,
 			genesis_hash,
 			best_hash,
+			(),
 			(),
 			(),
 			(),

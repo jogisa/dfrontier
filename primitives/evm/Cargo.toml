@@ -20,6 +20,8 @@ serde = { workspace = true, optional = true }
 frame-support = { workspace = true }
 sp-core = { workspace = true }
 sp-runtime = { workspace = true }
+# Cumulus
+cumulus-primitives-storage-weight-reclaim = { workspace = true }
 
 [features]
 default = ["std"]
@@ -33,6 +35,8 @@ std = [
 	"frame-support/std",
 	"sp-core/std",
 	"sp-runtime/std",
+	# Cumulus
+	"cumulus-primitives-storage-weight-reclaim/std",
 ]
 serde = [
 	"dep:serde",

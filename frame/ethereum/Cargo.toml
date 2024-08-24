@@ -21,6 +21,8 @@ frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-io = { workspace = true }
 sp-runtime = { workspace = true }
+# Cumulus
+cumulus-primitives-storage-weight-reclaim = { workspace = true }
 # Frontier
 fp-consensus = { workspace = true }
 fp-ethereum = { workspace = true }
@@ -49,6 +51,8 @@ std = [
 	"rlp/std",
 	"scale-codec/std",
 	"scale-info/std",
+	# Cumulus
+	"cumulus-primitives-storage-weight-reclaim/std",
 	# Substrate
 	"frame-support/std",
 	"frame-system/std",

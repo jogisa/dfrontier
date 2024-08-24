@@ -59,12 +59,12 @@ extern crate alloc;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
-
 #[cfg(test)]
 mod mock;
-pub mod runner;
 #[cfg(test)]
 mod tests;
+
+pub mod runner;
 pub mod weights;
 
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
@@ -246,7 +246,6 @@ pub mod pallet {
 				is_transactional,
 				validate,
 				None,
-				None,
 				T::config(),
 			) {
 				Ok(info) => info,
@@ -320,7 +319,6 @@ pub mod pallet {
 				access_list,
 				is_transactional,
 				validate,
-				None,
 				None,
 				T::config(),
 			) {
@@ -408,7 +406,6 @@ pub mod pallet {
 				access_list,
 				is_transactional,
 				validate,
-				None,
 				None,
 				T::config(),
 			) {
@@ -504,6 +501,8 @@ pub mod pallet {
 		Reentrancy,
 		/// EIP-3607,
 		TransactionMustComeFromEOA,
+		/// Proof size limit is too low
+		ProofLimitTooLow,
 		/// Undefined error.
 		Undefined,
 	}
@@ -521,6 +520,7 @@ pub mod pallet {
 				TransactionValidationError::InvalidFeeInput => Error::<T>::GasPriceTooLow,
 				TransactionValidationError::InvalidChainId => Error::<T>::InvalidChainId,
 				TransactionValidationError::InvalidSignature => Error::<T>::InvalidSignature,
+				TransactionValidationError::ProofLimitTooLow => Error::<T>::ProofLimitTooLow,
 				TransactionValidationError::UnknownError => Error::<T>::Undefined,
 			}
 		}

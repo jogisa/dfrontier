@@ -31,6 +31,7 @@ use sp_runtime::{
 	traits::{BlakeTwo256, Dispatchable, IdentityLookup},
 	AccountId32, BuildStorage,
 };
+
 // Frontier
 use pallet_evm::{AddressMapping, EnsureAddressTruncated, FeeCalculator};
 
@@ -273,34 +274,10 @@ fn address_build(seed: u8) -> AccountInfo {
 
 // This function basically just builds a genesis storage key/value store according to
 // our desired mockup.
-pub fn new_test_ext(accounts_len: usize) -> (Vec<AccountInfo>, sp_io::TestExternalities) {
-	// sc_cli::init_logger("");
-	let mut ext = frame_system::GenesisConfig::<Test>::default()
-		.build_storage()
-		.unwrap();
-
-	let pairs = (0..accounts_len)
-		.map(|i| address_build(i as u8))
-		.collect::<Vec<_>>();
-
-	let balances: Vec<_> = (0..accounts_len)
-		.map(|i| (pairs[i].account_id.clone(), 10_000_000))
-		.collect();
-
-	pallet_balances::GenesisConfig::<Test> { balances }
-		.assimilate_storage(&mut ext)
-		.unwrap();
-
-	(pairs, ext.into())
-}
-
-// This function basically just builds a genesis storage key/value store according to
-// our desired mockup.
 pub fn new_test_ext_with_initial_balance(
 	accounts_len: usize,
 	initial_balance: u64,
 ) -> (Vec<AccountInfo>, sp_io::TestExternalities) {
-	// sc_cli::init_logger("");
 	let mut ext = frame_system::GenesisConfig::<Test>::default()
 		.build_storage()
 		.unwrap();
@@ -318,6 +295,10 @@ pub fn new_test_ext_with_initial_balance(
 		.unwrap();
 
 	(pairs, ext.into())
+}
+
+pub fn new_test_ext(accounts_len: usize) -> (Vec<AccountInfo>, sp_io::TestExternalities) {
+	new_test_ext_with_initial_balance(accounts_len, 10_000_000)
 }
 
 pub fn contract_address(sender: H160, nonce: u64) -> H160 {

@@ -64,7 +64,8 @@ use fp_consensus::{PostLog, PreLog, FRONTIER_ENGINE_ID};
 pub use fp_ethereum::TransactionData;
 use fp_ethereum::ValidatedTransaction as ValidatedTransactionT;
 use fp_evm::{
-	CallOrCreateInfo, CheckEvmTransaction, CheckEvmTransactionConfig, TransactionValidationError,
+	CallOrCreateInfo, CheckEvmTransaction, CheckEvmTransactionConfig, TransactionPov,
+	TransactionValidationError,
 };
 pub use fp_rpc::TransactionStatus;
 use fp_storage::{EthereumStorageSchema, PALLET_ETHEREUM_SCHEMA};
@@ -294,7 +295,6 @@ pub mod pallet {
 				fp_consensus::find_pre_log(&frame_system::Pallet::<T>::digest()).is_err(),
 				"pre log already exists; block is invalid",
 			);
-
 			Self::apply_validated_transaction(source, transaction).map(|(post_info, _)| post_info)
 		}
 	}
@@ -361,17 +361,14 @@ pub mod pallet {
 }
 
 impl<T: Config> Pallet<T> {
-	pub fn transaction_weight(transaction_data: &TransactionData) -> (Option<Weight>, Option<u64>) {
-		match <T as pallet_evm::Config>::GasWeightMapping::gas_to_weight(
+	pub fn transaction_pov(transaction_data: &TransactionData) -> Option<TransactionPov> {
+		let weight_limit = <T as pallet_evm::Config>::GasWeightMapping::gas_to_weight(
 			transaction_data.gas_limit.unique_saturated_into(),
 			true,
-		) {
-			weight_limit if weight_limit.proof_size() > 0 => (
-				Some(weight_limit),
-				Some(transaction_data.proof_size_base_cost()),
-			),
-			_ => (None, None),
-		}
+		);
+		cumulus_primitives_storage_weight_reclaim::get_proof_size().map(
+			|proof_size_pre_execution| TransactionPov::new(weight_limit, proof_size_pre_execution),
+		)
 	}
 
 	fn recover_signer(transaction: &Transaction) -> Option<H160> {
@@ -493,7 +490,7 @@ impl<T: Config> Pallet<T> {
 	) -> TransactionValidity {
 		let transaction_data: TransactionData = transaction.into();
 		let transaction_nonce = transaction_data.nonce;
-		let (weight_limit, proof_size_base_cost) = Self::transaction_weight(&transaction_data);
+		let transaction_pov = Self::transaction_pov(&transaction_data);
 		let (base_fee, _) = T::FeeCalculator::min_gas_price();
 		let (who, _) = pallet_evm::Pallet::<T>::account_basic(&origin);
 
@@ -506,8 +503,7 @@ impl<T: Config> Pallet<T> {
 				is_transactional: true,
 			},
 			transaction_data.clone().into(),
-			weight_limit,
-			proof_size_base_cost,
+			transaction_pov,
 		)
 		.validate_in_pool_for(&who)
 		.and_then(|v| v.with_chain_id())
@@ -723,7 +719,7 @@ impl<T: Config> Pallet<T> {
 		config: Option<evm::Config>,
 	) -> Result<(Option<H160>, Option<H160>, CallOrCreateInfo), DispatchErrorWithPostInfo> {
 		let transaction_data: TransactionData = transaction.into();
-		let (weight_limit, proof_size_base_cost) = Self::transaction_weight(&transaction_data);
+		let transaction_pov = Self::transaction_pov(&transaction_data);
 		let is_transactional = true;
 		let validate = false;
 
@@ -801,8 +797,7 @@ impl<T: Config> Pallet<T> {
 					access_list,
 					is_transactional,
 					validate,
-					weight_limit,
-					proof_size_base_cost,
+					transaction_pov,
 					config.as_ref().unwrap_or_else(|| T::config()),
 				) {
 					Ok(res) => res,
@@ -831,8 +826,7 @@ impl<T: Config> Pallet<T> {
 					access_list,
 					is_transactional,
 					validate,
-					weight_limit,
-					proof_size_base_cost,
+					transaction_pov,
 					config.as_ref().unwrap_or_else(|| T::config()),
 				) {
 					Ok(res) => res,
@@ -861,7 +855,7 @@ impl<T: Config> Pallet<T> {
 		transaction: &Transaction,
 	) -> Result<(), TransactionValidityError> {
 		let transaction_data: TransactionData = transaction.into();
-		let (weight_limit, proof_size_base_cost) = Self::transaction_weight(&transaction_data);
+		let transaction_pov = Self::transaction_pov(&transaction_data);
 		let (base_fee, _) = T::FeeCalculator::min_gas_price();
 		let (who, _) = pallet_evm::Pallet::<T>::account_basic(&origin);
 
@@ -874,8 +868,7 @@ impl<T: Config> Pallet<T> {
 				is_transactional: true,
 			},
 			transaction_data.into(),
-			weight_limit,
-			proof_size_base_cost,
+			transaction_pov,
 		)
 		.validate_in_block_for(&who)
 		.and_then(|v| v.with_chain_id())
@@ -989,6 +982,9 @@ pub struct InvalidTransactionWrapper(InvalidTransaction);
 impl From<TransactionValidationError> for InvalidTransactionWrapper {
 	fn from(validation_error: TransactionValidationError) -> Self {
 		match validation_error {
+			TransactionValidationError::ProofLimitTooLow => InvalidTransactionWrapper(
+				InvalidTransaction::Custom(TransactionValidationError::ProofLimitTooLow as u8),
+			),
 			TransactionValidationError::GasLimitTooLow => InvalidTransactionWrapper(
 				InvalidTransaction::Custom(TransactionValidationError::GasLimitTooLow as u8),
 			),
